@@ -11,7 +11,7 @@ STATE = ROOT / "state" / "used.json"
 QUEUE = ROOT / "inbox" / "queue.json"
 WORK = ROOT / "work"
 
-PEXELS_KEY = os.environ["PEXELS_API_KEY"]
+PEXELS_KEY = os.environ.get("PEXELS_API_KEY", "")
 GEMINI_KEY = os.environ["GEMINI_API_KEY"]
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
 LANGUAGE = os.environ.get("CHANNEL_LANGUAGE", "English")
@@ -71,12 +71,12 @@ def pick_youtube(used):
         base["cookiefile"] = str(cf)
     if channels:
         random.shuffle(channels)
-        sources = [(c.rstrip("/") + "/videos", False) for c in channels]
+        sources = [(c.rstrip("/") + "/shorts", False) for c in channels]
     else:
         qs = YT_QUERIES[:]
         random.shuffle(qs)
         sources = [("https://www.youtube.com/results?search_query="
-                    + urllib.parse.quote(q) + "&sp=EgIwAQ%253D%253D", True) for q in qs[:4]]
+                    + urllib.parse.quote(q + " shorts") + "&sp=EgIwAQ%253D%253D", True) for q in qs[:4]]
     for src, need_cc in sources:
         try:
             with yt_dlp.YoutubeDL({**base, "extract_flat": True, "skip_download": True}) as y:
@@ -95,7 +95,7 @@ def pick_youtube(used):
                 lic = (meta.get("license") or "").lower()
                 if need_cc and "creative commons" not in lic:
                     continue
-                if (meta.get("duration") or 0) > 180:
+                if not (0 < (meta.get("duration") or 0) <= 180) or (meta.get("height") or 0) <= (meta.get("width") or 0):
                     continue
                 opts = {**base, "format": "bv[height<=1080]/b[height<=1080]",
                         "outtmpl": str(WORK / "clip.%(ext)s")}
@@ -147,13 +147,24 @@ def pick_pexels(used):
     raise RuntimeError("No Pexels video found")
 
 
-def write_script(hint):
-    prompt = f"""You write YouTube Shorts for a channel about cooking, desserts, fruits, vegetables and plants.
-The video on screen shows: {hint}.
-Write in {LANGUAGE}.
+def write_script(hint, seconds):
+    seconds = int(max(25, min(seconds, 165)))
+    words = int(seconds * 2.3)
+    prompt = f"""You are a top-tier YouTube Shorts scriptwriter for a viral food channel (cooking, street food, shawarma, pizza, desserts, ice cream, fruits, vegetables).
+The footage on screen: {hint}.
+Language: {LANGUAGE}.
+Write a voiceover of about {words} words. Spoken at a natural pace it must last roughly {seconds} seconds.
+Style rules:
+- The first sentence is a scroll-stopping hook: a surprising fact, a bold question, or a curiosity gap. Never start with greetings, "welcome", "today we", or "in this video".
+- Short, punchy, spoken sentences. Vary the rhythm. Talk directly to the viewer using "you".
+- Use sensory words (sizzle, crunch, steam, aroma) tied to what is plausibly visible.
+- Plant two open loops (for example "but the real secret comes later") and pay them off before the end.
+- Include two or three genuinely interesting, TRUE, general facts about the food, its origin, or the technique. Do NOT invent claims about this specific video, people, places or brands, and make no medical or health promises.
+- End with a line that loops back to the opening hook so the video replays naturally, then one very short call to follow.
+- Plain text only: no emojis, hashtags, stage directions or labels.
 Return ONLY JSON with keys:
-- title: catchy, max 60 characters
-- narration: 70 to 95 words, plain text, no emojis, an interesting fact-based voiceover about the food or plant shown. Do not invent specific claims about this exact video (people, places, brands). Start with a hook.
+- title: max 60 characters, curiosity-driven, no false clickbait
+- narration: the voiceover text
 - description: 2 short sentences
 - tags: list of 8 short keywords"""
     r = requests.post(
@@ -161,7 +172,7 @@ Return ONLY JSON with keys:
         params={"key": GEMINI_KEY},
         json={"contents": [{"parts": [{"text": prompt}]}],
               "generationConfig": {"responseMimeType": "application/json"}},
-        timeout=90,
+        timeout=120,
     )
     r.raise_for_status()
     text = r.json()["candidates"][0]["content"]["parts"][0]["text"]
@@ -229,10 +240,12 @@ def main():
     shutil.rmtree(WORK, ignore_errors=True)
     WORK.mkdir()
     used = load_used()
-    picked = pick_inbox(used) or pick_youtube(used) or pick_pexels(used)
+    picked = pick_inbox(used) or pick_youtube(used) or (pick_pexels(used) if PEXELS_KEY else None)
+    if not picked:
+        raise SystemExit("No video found. Check SOURCE_CHANNELS, cookies, or inbox.")
     key, clip, hint, credit = picked
     print("Source:", key, "|", hint)
-    meta = write_script(hint)
+    meta = write_script(hint, duration(clip))
     print("Title:", meta["title"])
     audio = WORK / "voice.mp3"
     tts(meta["narration"], audio)
